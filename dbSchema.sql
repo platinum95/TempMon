@@ -1,4 +1,4 @@
 CREATE DATABASE IF NOT EXISTS TempMonDB;
 USE TempMonDB;
-CREATE TABLE IF NOT EXISTS sensorData (id INT, temp FLOAT, humidity FLOAT, timestamp INT);
+CREATE TABLE IF NOT EXISTS SensorData (id INT NOT NULL AUTO_INCREMENT, temp FLOAT, humidity FLOAT, timestamp INT, PRIMARY KEY (id));
 

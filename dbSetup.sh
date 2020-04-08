@@ -1,15 +1,28 @@
 #!/bin/bash
-if [[ $# -ne 1 ]]
+
+if [[ "$EUID" -ne 0 ]]
 then
-    echo "No user password specified. Usage: dbSetup.sh <user password>"
-    exit 1
+    echo "Script should be run as root to access MySQL. Failure may occur"
 fi
 
-UserPw=$1
 
-echo "Enter MySQL root Password"
-read -sp dbRootPassword
-echo "Creating DB user TempMonUser@localhost with password " ${UserPw}
+if [[ $# -ne 1 ]]
+then
+    read -sp "New user password: " UserPw
+    echo
+    read -sp "Enter new password again: " UserPw2
+    echo
+    if [[ "${UserPw}" != "${UserPw2}" ]] 
+    then
+        echo "Passwords did not match"
+        exit 1
+    fi
+else
+    UserPw=$1
+fi
+
+read -sp "MySQL root password: " dbRootPassword
+echo
 mysql -uroot -p{dbRootPassword} -e "SOURCE ./dbSchema.sql;"
 mysql -uroot -p{dbRootPassword} -e "CREATE USER IF NOT EXISTS TempMonUser@localhost IDENTIFIED BY '${UserPw}';"
 mysql -uroot -p{dbRootPassword} -e "GRANT ALL PRIVILEGES ON TempMonDB.* to 'TempMonUser'@'localhost';"
