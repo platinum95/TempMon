@@ -10,22 +10,35 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 int getSignalLevel( const DhtCtx *_ctx, int usTimeOut, bool state );
 // == global defines =============================================
 
-const char *logTag = "DHT";
+//#define PRINT_DHT_TRANSITIONS
+static const char *logTag = "DHT";
 
 #define assertCall( func, failureMessage ) if( func != ESP_OK ){ ESP_LOGE( logTag, failureMessage ); return 1; }
+
+static inline void delayUs( uint32_t _delayUs ){
+	uint32_t delayMs = _delayUs / 1e3;
+	uint32_t delayTicks = delayMs / portTICK_RATE_MS;
+	delayTicks++;
+	ESP_LOGD( logTag, "Delaying task by %i ticks", delayTicks );
+	vTaskDelay( delayTicks );
+}
 
 void IRAM_ATTR dhtGpioIsr( void *_args ){
 	volatile DhtTransitionCtx *transitions = (DhtTransitionCtx*) _args;
 
-	if( transitions->nextTransitionIdx == ARR_SIZE ){
+	uint8_t currIdx = transitions->nextTransitionIdx;
+	transitions->nextTransitionIdx++;
+	if( currIdx >= ARR_SIZE ){
 		transitions->overflow = true;
 		return;
 	}
-	volatile DhtTransitionTimestamp *timestamp = &transitions->timestampArray[ transitions->nextTransitionIdx ];
-	transitions->nextTransitionIdx++;
+	volatile DhtTransitionTimestamp *timestamp = &transitions->timestampArray[ currIdx ];
 	int64_t timeDiff = esp_timer_get_time() - transitions->startTime;
 	if( timeDiff < 0 ) timeDiff = 0;
 	if( timeDiff > UINT32_MAX ) timeDiff = UINT32_MAX;
@@ -59,7 +72,7 @@ uint32_t initialiseDht( DhtCtx *_ctx, uint8_t _pin ){
 	_ctx->transitionCtx.nextTransitionIdx = 0;
 	_ctx->transitionCtx.pin = _pin;
 	assertCall( gpio_isr_handler_add( _pin, dhtGpioIsr, (void*) &_ctx->transitionCtx ), "Failed to add DHT gpio ISR" );
-
+	assertCall( gpio_intr_disable( _pin ), "Failed to disable DHT GPIO interrupt" );
 	ESP_LOGI( logTag, "Setup DHT context\n" );
 	_ctx->initialised = true;
 
@@ -70,7 +83,7 @@ uint32_t initialiseDht( DhtCtx *_ctx, uint8_t _pin ){
 // == error handler ===============================================
 
 // Wait for `level` to occur on pin, or exit after `timout` uS. 
-inline uint8_t waitForSignalChange( DhtCtx *_ctx, uint8_t level, uint16_t timeout, uint16_t *timeWaited ){
+static inline uint8_t waitForSignalChange( DhtCtx *_ctx, uint8_t level, uint16_t timeout, uint16_t *timeWaited ){
 	level = level ? 1 : 0;
 	if( gpio_get_level( _ctx->pin ) == level ){
 		*timeWaited = 0;
@@ -139,7 +152,7 @@ uint32_t readDht( DhtCtx *_ctx, float * _temp, float *_hum ){
 		ESP_LOGE( logTag, "Attempting to use uninitialised DHT context" );
 		return 1;
 	}
-
+	
 	int pin = _ctx->pin;
 	assertCall( gpio_set_direction( pin, GPIO_MODE_INPUT ), "Failed to set DHT pin to input mode" );
 
@@ -147,7 +160,7 @@ uint32_t readDht( DhtCtx *_ctx, float * _temp, float *_hum ){
 		ESP_LOGE( logTag, "Invalid start condition for DHT value read" );
 		return 1;
 	}
-		
+	
 	assertCall( gpio_set_direction( pin, GPIO_MODE_OUTPUT ), "Failed to set DHT pin to output mode" );
 
 	volatile DhtTransitionCtx *transitionCtx = (DhtTransitionCtx*) &_ctx->transitionCtx;
@@ -157,22 +170,20 @@ uint32_t readDht( DhtCtx *_ctx, float * _temp, float *_hum ){
 	assertCall( gpio_set_level( pin, 0 ), "Failed to set DHT pin level" );
 	
 	 // Configure sleep for 5000uS
-	assertCall( esp_sleep_enable_timer_wakeup( 5e3 ), "Failed to set wakup timer in DHT read" );
-	assertCall( esp_light_sleep_start(), "Failed to sleep in DHT read" );
 
+	//assertCall( esp_sleep_enable_timer_wakeup( 5e3 ), "Failed to set wakup timer in DHT read" );
+	//assertCall( esp_light_sleep_start(), "Failed to sleep in DHT read" );
+	delayUs( 5e3 );
 	/*
 	* Pull pin high
 	******************************************************/
 	assertCall( gpio_set_level( pin, 1 ), "Failed to set DHT pin level" );
-		
-	transitionCtx->nextTransitionIdx = 0;
-	transitionCtx->pin = _ctx->pin;
-	transitionCtx->overflow = false;
-
+	
 	ets_delay_us( 25 );
-	transitionCtx->startTime = esp_timer_get_time();
-	assertCall( gpio_set_direction( pin, GPIO_MODE_INPUT ), "Failed to set DHT pin to input mode" );
+	
 
+	assertCall( gpio_set_direction( pin, GPIO_MODE_INPUT ), "Failed to set DHT pin to input mode" );
+	transitionCtx->pin = _ctx->pin;
 	/*
 	* Wait for DHT pulldown response
 	*********************************************************/
@@ -187,14 +198,42 @@ uint32_t readDht( DhtCtx *_ctx, float * _temp, float *_hum ){
 		}
 	}
 
+	
+	transitionCtx->nextTransitionIdx = 0;
+	transitionCtx->overflow = false;
+	transitionCtx->startTime = esp_timer_get_time();
+	//assertCall( gpio_isr_handler_add( _ctx->pin, dhtGpioIsr, (void*) &_ctx->transitionCtx ), "Failed to add DHT gpio ISR" );
+	assertCall( gpio_intr_enable( pin ), "Failed to enable DHT GPIO interrupt" );
+
 	// Wait for data to come in
 	// Should be around 4500 uS
 	// TODO - rather than sleep here, we should loop checking for new ISR data, and consume it.
 	// 		  This way, we can reduce the size of the DHT context by having a much smaller data array
+	int64_t mainSleepStart = esp_timer_get_time();
 	ESP_LOGD( logTag, "Sleeping for %i uS", DHT_DATA_TIME_MAX );
-	ets_delay_us( DHT_DATA_TIME_MAX );
-	
+	delayUs( DHT_DATA_TIME_MAX );
+	int64_t sleptFor = esp_timer_get_time() - mainSleepStart;
+	ESP_LOGD( logTag, "Slept for %i uS", (int) sleptFor );
+
+	// Disable ISR
+	assertCall( gpio_intr_disable( pin ), "Failed to enable DHT GPIO interrupt" );
+	//assertCall( gpio_isr_handler_remove( _ctx->pin ), "Failed to disable DHT ISR" );
+
 	ESP_LOGD( logTag, "Recorded %i transitions, expected %i", transitionCtx->nextTransitionIdx, TRANSITION_COUNT );
+#ifdef PRINT_DHT_TRANSITIONS
+	// Print out transition history	
+	uint8_t transitionCount = transitionCtx->nextTransitionIdx < TRANSITION_COUNT ? transitionCtx->nextTransitionIdx : TRANSITION_COUNT;
+	for( uint8_t i = 0; i < transitionCount; i++ ){
+		uint8_t level;
+		uint16_t tDiff;
+		if( decodeTransition( transitionCtx, i, &level, &tDiff ) ){
+			ESP_LOGE( logTag, "Failed to decode transition %i", i );
+			
+			return 1;
+		}
+		ESP_LOGI( logTag, "State %i for %i uS", level, tDiff );
+	}
+#endif
 	if( transitionCtx->nextTransitionIdx != TRANSITION_COUNT ){
 		ESP_LOGE( logTag, "Did not record expected number of transitions" );
 		return 1;
@@ -204,22 +243,11 @@ uint32_t readDht( DhtCtx *_ctx, float * _temp, float *_hum ){
 		return 1;
 	}
 
-#ifdef PRINT_DHT_TRANSITIONS
-	// Print out transition history	
-	for( int i = 0; i < transitionCtx->nextTransitionIdx; i++ ){
-		uint8_t level;
-		uint16_t tDiff;
-		if( decodeTransition( transitionCtx, i, &level, &tDiff ) ){
-			ESP_LOGE( logTag, "Failed to decode transition %i", i );
-			return 1;
-		}
-		ESP_LOGI( logTag, "State %i for %i uS", level, tDiff );
-	}
-#endif
-	int64_t maxTime = (int64_t)transitionCtx->timestampArray[ 83 ].timeStamp;
+
+	int64_t maxTime = (int64_t)transitionCtx->timestampArray[ TRANSITION_COUNT - 1 ].timeStamp;
 	ESP_LOGI( logTag, "Max time: %i", (int) maxTime );
-	// Skip first 4 transitions (sensor init)
-	uint8_t currIdx = 3;
+	// Skip first 3 transitions (sensor init)
+	uint8_t currIdx = 2;
 	// Start loading in the bits
 	uint16_t humidityValRead = 0;
 	uint16_t tempValRead = 0;

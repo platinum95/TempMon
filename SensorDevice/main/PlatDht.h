@@ -15,7 +15,7 @@ typedef struct DhtCtx DhtCtx;
 #define TRANSITION_FINAL		 1 // Final transition from lo-hi at end
 #define NUM_BITS				 40
 #define TRANSITIONS_FOR_DATA     TRANSITIONS_PER_BIT * NUM_BITS
-#define TRANSITION_COUNT         TRANSITIONS_FOR_DATA + SENSOR_START_TRANSITIONS + TRANSITION_FINAL
+#define TRANSITION_COUNT         TRANSITIONS_FOR_DATA + SENSOR_START_TRANSITIONS + TRANSITION_FINAL - 1
 
 #define ARR_SIZE TRANSITION_COUNT // Just throw a couple extra transition spots in there
 
