@@ -1,0 +1,386 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title> MC Portal</title>
+        <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    </head>
+    <body>
+        <h1 class="title-text">MC Portal</h1>
+        <div id="outer">
+            <div class="inner">
+                <input type="button" id="enButton" value="Start Server" disabled />
+            </div>
+            <div class="inner">
+                <input type="button" id="stopButton" value="Stop Server" disabled />
+            </div>
+            <div class="inner">
+                <input type="button" id="userListButton" value="Refresh Users" />
+            </div>
+            <div class="inner">
+                <form action="{{ url_for( 'do_logout' ) }}">
+                    <input type="submit" value="Logout" />
+                </form>
+            </div>
+        </div>
+        <div id="userlistdivcont" class="userlistclass">
+            <div id="userlistdiv">No information received</div>
+        </div>
+
+        <div id="chartParentDiv" class="chartParentClass"  >
+            <div id="chartControlDiv" class="outer" >
+                <div class="inner">
+                    <input type="button" id="5mChartButton" value="5 min" disabled />
+                </div>
+                <div class="inner">
+                    <input type="button" id="30mChartButton" value="30 min" disabled />
+                </div>
+                <div class="inner">
+                    <input type="button" id="6hChartButton" value="6 hour" disabled />
+                </div>
+                <div class="inner">
+                    <input type="button" id="1dChartButton" value="1 Day" disabled />
+                </div>
+                <div class="inner">
+                    <input type="button" id="allChartButton" value="All data" disabled />
+                </div>
+            </div>
+            <div id="charDiv" >
+                <canvas id="tempChart"></canvas>
+                <canvas id="usageChart" ></canvas>
+                <canvas id="ramChart"></canvas>
+            </div>
+        </div>
+    </body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.13.0/moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@2.8.0"></script>
+    <script src="//code.jquery.com/jquery-1.12.4.min.js" integrity="sha256-ZosEbRLbNQzLpnKIkEdrPv7lOy9C27hHQ+Xp8a4MxAQ=" crossorigin="anonymous"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/2.2.0/socket.io.js" integrity="sha256-yr4fRk/GU1ehYJPAs8P4JlTgu0Hdsp4ZKrx8bDEDC3I=" crossorigin="anonymous"></script>
+    <script type="text/javascript" src="{{ url_for('static', filename = 'js/chartjs-plugin-downsample.js') }}" ></script>
+    <script type="text/javascript" charset="utf-8">
+        $( document ).ready( function() {
+            console.log( "Starting up" );
+            var mclogNs = "/mclog";
+            var sysmonNs = "/system_monitor";
+
+            var mclogSocket = io( mclogNs );
+            var sysmonSocket = io( sysmonNs );
+
+            mclogSocket.on( 'connect', function(){
+                console.log( "mcLog socket connected" );
+            });
+
+            mclogSocket.on( 'log_data', function( msg ){
+                console.log( "Log data received" )
+                var logContainer = document.getElementById( 'data' );
+                var logObj = msg;
+                var logText = logObj.log;
+                var atBottom = logContainer.scrollTop == logContainer.scrollHeight;
+                logContainer.textContent += logText;
+                logContainer.scrollTop = logContainer.scrollHeight;
+                
+            });
+            
+            mclogSocket.on( 'user_list', function( msg ){
+                console.log( "User list received" )
+                var userList = document.getElementById( 'userlistdiv' );
+                var numUsers = msg.user_list.length;
+                if( numUsers == 0 ){
+                    userList.textContent = "No users logged in";
+                }
+                else{
+                    userList.textContent = "Users (" + numUsers + "/20):"
+                    for( i=0; i < msg.user_list.length; i++ ){
+                        var username = msg.user_list[ i ];
+                        userList.textContent += '\r\n' + username;
+                }
+            }    
+            });
+
+            mclogSocket.on( 'service_status', function( msg ){
+                console.log( "Service status received" )
+                var status = document.getElementById('status');
+                var enButton = document.getElementById( 'enButton' );
+                var stopButton = document.getElementById( 'stopButton' );
+                var userListButton = document.getElementById( 'userListButton' );
+                var userList = document.getElementById( 'userlistdiv' );
+                var serverStatus = msg.service_status;
+
+                if( serverStatus == 0 ){
+                    // Server is disabled
+                    status.textContent = "Minecraft server is not currently running";
+                    userList.textContent = "No users logged in (server down)";
+                    enButton.disabled = false;
+                    stopButton.disabled = true;
+                    userListButton.disabled = true;
+                }
+                else if( serverStatus == 1 ){
+                    // Server running
+                    status.textContent = "Minecraft server is up and running";
+                    enButton.disabled = true;
+                    stopButton.disabled = false;
+                    userListButton.disabled = false;
+                }
+                else if( serverStatus == 2 ){
+                    // Server failed
+                    status.textContent = "Minecraft server has crashed";
+                    userList.textContent = "No users logged in (server down)";
+                    enButton.disabled = false;
+                    stopButton.disabled = true;
+                    userListButton.disabled = true;
+                }
+                else{
+                    status.textContent = "Failed to determine server status";
+                    userList.textContent = "No users logged in (server down)";
+                    enButton.disabled = true;
+                    stopButton.disabled = true;
+                    userListButton.disabled = true;
+                }
+            });
+
+            $( '#userListButton' ).click( function(){
+                mclogSocket.emit( 'user_query' );
+            });
+
+            $( '#enButton' ).click( function(){
+                mclogSocket.emit( 'service_control', { type : 0 } );
+            });
+
+            $( '#stopButton' ).click( function(){
+                mclogSocket.emit( 'service_control', { type : 1 } );
+            });
+
+            setInterval(function() {
+                mclogSocket.emit( 'service_status_request' );
+            }, 5000);
+
+            function requestMonitorData( buttonId ){
+                console.log( "Request monitor data" );
+                if( buttonId > 4 || buttonId < 0 ){
+                    return
+                }
+                var m5b = document.getElementById( '5mChartButton' );   // 0
+                var m30b = document.getElementById( '30mChartButton' ); // 1
+                var h6b = document.getElementById( '6hChartButton' );   // 2
+                var d1b = document.getElementById( '1dChartButton' );   // 3
+                var allb = document.getElementById( 'allChartButton' ); // 4
+                
+                var buttonArray = [ m5b, m30b, h6b, d1b, allb ];
+                var timeDiffSec = [ 5 * 60, 30 * 60, 60 * 60 * 6, 60 * 60 * 24, 0 ];
+
+
+                sysmonSocket.emit( "sensor_request", { timeDiff : timeDiffSec[ buttonId ] } );
+                for( i = 0; i < buttonArray.length; i++ ){
+                    if( i == buttonId ){
+                        continue;
+                    }
+                    buttonArray[ i ].disabled = false;
+                }
+                buttonArray[ buttonId ].disabled = true;
+            }
+
+            sysmonSocket.on( "sensor_data", function( sysData ){
+                console.log( "Received monitor data" );
+                console.log( sysData );
+                var temps = sysData.temperatures;
+                var hums = sysData.humidities;
+                var timeStamps = sysData.timestamps;
+                var numPoints = sysData.timestamps.length;
+
+                for( i=0; i < numPoints; i++ ){
+                    var epochVal = timeStamps[ i ];
+                    timeStamps[ i ] = new Date( epochVal * 1000 );
+                }
+                var tempData = {
+                    labels: timeStamps,
+                    datasets: [{
+                        label: 'Temperature',
+                        borderColor: 'rgb(255, 0, 0)',
+                        backgroundColor: 'rgb(255, 0, 0)',
+                        fill: false,
+                        data: temps,
+                        pointRadius: 0,
+                    }, {
+                        label: 'Humidity',
+                        borderColor: 'rgb(0, 255, 0)',
+                        backgroundColor: 'rgb(0, 255, 0)',
+                        fill: false,
+                        data: hums,
+                        pointRadius: 0,
+                    }]
+                };
+                
+                cpuTempChart.data = tempData;
+                
+                cpuTempChart.update()
+                cpuTempChart.update()
+            });
+
+            $( '#5mChartButton' ).click( function(){ requestMonitorData( 0 ) } );
+            $( '#30mChartButton' ).click( function(){ requestMonitorData( 1 ) } );
+            $( '#6hChartButton' ).click( function(){ requestMonitorData( 2 ) } );
+            $( '#1dChartButton' ).click( function(){ requestMonitorData( 3 ) } );
+            $( '#allChartButton' ).click( function(){ requestMonitorData( 4 ) } );
+
+
+
+            requestMonitorData( 0 );
+            
+            // Set up charts
+            
+            aspectRatio = 4;
+            threshold = 50;
+
+            var tempCtx = document.getElementById( 'tempChart' ).getContext( '2d' );
+            var cpuTempChart = new Chart(tempCtx, {
+                type: 'line',
+                data: { },
+                datasets: [ ],
+                
+                options: {
+                    title: {
+                        display: true,
+                        text: 'CPU Temps'
+                    },
+                    responsiveAnimationDuration: 0, // animation duration after a resize
+                    responsive: true,
+                    aspectRatio: aspectRatio,
+                    hoverMode: 'index',
+                    stacked: false,
+                    downsample: {
+                        enabled: true,
+                        threshold: threshold,
+                    },
+                    scales: {
+                        xAxes: [{
+                            type: 'time',
+                            time: {
+                                unit: "minute",
+                                //stepSize: 100,
+                            },
+                            ticks: {
+                                autoSkip: true,
+                            },
+                            scaleLabel: {
+							    display: true,
+                                labelString: 'Date',
+						    }
+                        }],
+                            
+                        yAxes: [{
+                            type: 'linear', // only linear but allow scale type registration. This allows extensions to exist solely for log scale for instance
+                            display: true,
+                            position: 'left',
+                            id: 'tempAxis',
+                            ticks: {
+                                suggestedMin: 10,
+                                suggestedMax: 70,
+                            },
+                        }],
+                    }
+                }
+            });
+
+            var usageCtx = document.getElementById( 'usageChart' ).getContext('2d');
+            var cpuUsageChart = new Chart(usageCtx, {
+                type: 'line',
+                data: [],
+                options: {            
+                    responsive: true,
+                    aspectRatio: aspectRatio,
+                    responsiveAnimationDuration: 0, // animation duration after a resize
+                    hoverMode: 'index',
+                    stacked: false,
+                    title: {
+                        display: true,
+                        text: 'CPU Usage'
+                    },
+                    downsample: {
+                        enabled: true,
+                        threshold: threshold,
+                    },
+                    scales: {
+                        xAxes: [{
+                            type: 'time',
+                            time: {
+                                unit: "minute",
+                                //stepSize: 100,
+                            },
+                            ticks: {
+                                autoSkip: true,
+                            },
+                            scaleLabel: {
+							    display: true,
+							    labelString: 'Date'
+						    }
+                        }],
+                        yAxes: [{
+                            type: 'linear', // only linear but allow scale type registration. This allows extensions to exist solely for log scale for instance
+                            display: true,
+                            position: 'left',
+                            id: 'y-axis-1',
+                            ticks: {
+                                suggestedMin: 0,
+                                suggestedMax: 40,
+                            },
+                        } ],
+                    }
+                }
+            });
+
+            var ramCtx = document.getElementById( 'ramChart' ).getContext('2d');
+            var ramChart = new Chart( ramCtx, {
+                type: 'line',
+                data: [],
+                options: {
+                    responsive: true,
+                    aspectRatio: aspectRatio,
+                    responsiveAnimationDuration: 0, // animation duration after a resize
+                    hoverMode: 'index',
+                    stacked: false,
+                    title: {
+                        display: true,
+                        text: 'RAM Usage'
+                    },
+                    legend: {
+                        display : false,
+                    },
+                    downsample: {
+                        enabled: true,
+                        threshold: threshold,
+                    },
+                    scales: {
+                        xAxes: [{
+                            type: 'time',
+                            time: {
+                                unit: "minute",
+                                //stepSize: 100,
+                            },
+                            ticks: {
+                                autoSkip: true,
+                            },
+                            scaleLabel: {
+							    display: true,
+							    labelString: 'Date'
+						    }
+                        }],
+                        yAxes: [{
+                            type: 'linear', // only linear but allow scale type registration. This allows extensions to exist solely for log scale for instance
+                            display: true,
+                            position: 'left',
+                            id: 'y-axis-1',
+                            ticks: {
+                                suggestedMin: 700,
+                                suggestedMax: 3000,
+                            },
+                        } ],
+                    }
+                }
+            });
+            });
+
+
+
+        
+    </script>
+</html>
