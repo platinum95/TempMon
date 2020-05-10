@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 #include "esp_sleep.h"
-#define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
+#define LOG_LOCAL_LEVEL ESP_LOG_WARN
 #include "esp_log.h"
 
 #include "PlatDht.h"
@@ -18,9 +18,9 @@
 
 #include "Mqtt.h"
 
-#define SSID			"Immy'sTheBest"
-#define PSK				"<placholder>"
-#define MQTT_HOST_URL 	"192.168.2.8"
+#define SSID			"<ssid here>"
+#define PSK				"<pw here>"
+#define MQTT_HOST_URL 	"SensorHub.local"
 #define MQTT_HOST_PORT 	1883
 #define MQTT_TOPIC "test/message"
 const char jsonFormat[] = "{ \"temp\":\"%2.1f\", \"hum\":\"%2.1f\"}";
@@ -30,58 +30,73 @@ DhtCtx dhtCtx = { 0 };
 NetworkCtx netCtx = { 0 };
 MqttCtx mqttCtx = { 0 };
 
-// 10 second interval
+
 #define SETUP_RETRY_INTERVAL_MS 2e3
-#define SENSOR_SEND_INTERVAL 5e3
+#define SENSOR_READ_INTERVAL_MS 30e3
+#define SENSOR_SEND_INTERVAL_MS SENSOR_READ_INTERVAL_MS / 3
+
+#define SENSOR_READ_RETRY_COUNT 5
 
 _Atomic bool dataReady = false;
+_Atomic bool wifiConnected = false;
 _Atomic float g_temperature = -1.0f;
 _Atomic float g_humidity = -1.0f;
 
-void networkTask( void *unused ){
+void initialiseNetwork( void ){
 	const char * logTag = "Network";
-	ESP_LOGI( logTag, "Task started" );
 	bool initialised = false;
 	while( !initialised ){
 		if( connectToWifi( &netCtx, SSID, PSK, true, 10e3 ) ){
-			ESP_LOGE( "Main", "Failed to connect to wifi" );
+			ESP_LOGE( logTag, "Failed to connect to wifi" );
 			vTaskDelay( SETUP_RETRY_INTERVAL_MS / portTICK_RATE_MS );
 			continue;
 		}
 
-		if( mqttInit( &mqttCtx, "192.168.2.8" ) ){
-			ESP_LOGE( "main", "Failed to start MQTT" );
+		if( mqttInit( &mqttCtx, MQTT_HOST_URL ) ){
+			ESP_LOGE( logTag, "Failed to start MQTT" );
 			vTaskDelay( SETUP_RETRY_INTERVAL_MS / portTICK_RATE_MS );
 			continue;
 		}
 		initialised = true;
 	}
+	ESP_LOGI( logTag, "Network/MQTT initialised successfully" );
+}
+
+void networkTask( void *unused ){
+	const char * logTag = "Network";
+	ESP_LOGI( logTag, "Task started" );
 	
+	initialiseNetwork();
+
 	char messageBuffer[ maxMessageLen ];
 	while( 1 ){
-		if( !atomic_load( &dataReady ) ){
-			continue;
+		if( !netCtx.connected ){
+			initialiseNetwork();
 		}
-		float temp = atomic_load( &g_temperature );
-		float humidity = atomic_load( &g_humidity );
-		atomic_store( &dataReady, false );
-		int len = snprintf( messageBuffer, maxMessageLen, jsonFormat, temp, humidity );
-		if( len >= maxMessageLen || len <= 0 ){
-			ESP_LOGE( logTag, "Failed to generate message string: %i", len );
-		}
-		else{
-			ESP_LOGD( logTag, "Sending MQTT message: %s", messageBuffer );
-			if( mqttPublish( &mqttCtx, MQTT_TOPIC, messageBuffer ) ){
-				ESP_LOGE( logTag, "Failed to publish sensor data" );
+		else if( atomic_load( &dataReady ) ){
+			float temp = atomic_load( &g_temperature );
+			float humidity = atomic_load( &g_humidity );
+			atomic_store( &dataReady, false );
+			int len = snprintf( messageBuffer, maxMessageLen, jsonFormat, temp, humidity );
+			if( len >= maxMessageLen || len <= 0 ){
+				ESP_LOGE( logTag, "Failed to generate message string: %i", len );
+			}
+			else{
+				ESP_LOGD( logTag, "Sending MQTT message: %s", messageBuffer );
+				if( mqttPublish( &mqttCtx, MQTT_TOPIC, messageBuffer ) ){
+					ESP_LOGE( logTag, "Failed to publish sensor data" );
+				}
 			}
 		}
-
-		vTaskDelay( SENSOR_SEND_INTERVAL / portTICK_RATE_MS );
+		else{
+			ESP_LOGI( logTag, "No data to send" );
+		}
+		vTaskDelay( SENSOR_SEND_INTERVAL_MS / portTICK_RATE_MS );
 	}
 }
 
 
-#define SENSOR_READ_INTERVAL_MS 2e3
+
 void DHT_task( void *pvParameter ){
 	const char * logTag = "DHT";
     ESP_LOGI( logTag, "Task started" );
@@ -95,20 +110,30 @@ void DHT_task( void *pvParameter ){
     	}
 		initialised = true;
 	}
-	
+	volatile bool *wifiConnected = &netCtx.connected;
 	while( dhtCtx.initialised ) {
-		printf("=== Reading DHT ===\n" );
-		float _temp=0.0f, _humidity=0.0f;
-		int ret = readDht( &dhtCtx, &_temp, &_humidity ) ;
-		if( ret ){
-			ESP_LOGE( logTag, "Failed to get DHT value" );
-		} else{
-			ESP_LOGD( logTag, "Temp %2.1f, Humidity %2.1f", _temp, _humidity );
+		if( *wifiConnected ){
+			float _temp=0.0f, _humidity=0.0f;
 
-			atomic_store( &g_temperature, _temp );
-			atomic_store( &g_humidity, _humidity );
-			atomic_store( &dataReady, true );
-		} 
+			int ret;
+			int retryIteration = 0;
+			do{
+				ret = readDht( &dhtCtx, &_temp, &_humidity ) ;
+			}while( ret && retryIteration++ < SENSOR_READ_RETRY_COUNT );
+
+			if( ret ){
+				ESP_LOGE( logTag, "Failed to get DHT value, tried %i times", SENSOR_READ_RETRY_COUNT );
+			}
+			else{
+				ESP_LOGD( logTag, "Temp %2.1f, Humidity %2.1f", _temp, _humidity );
+				atomic_store( &g_temperature, _temp );
+				atomic_store( &g_humidity, _humidity );
+				atomic_store( &dataReady, true );
+			}
+		}
+		else{
+			ESP_LOGI( logTag, "No connection, not reading DHT" );
+		}
 		vTaskDelay( SENSOR_READ_INTERVAL_MS / portTICK_RATE_MS );
 	}
 }

@@ -8,6 +8,9 @@
 typedef struct NetworkCtx NetworkCtx;
 
 struct NetworkCtx{
+    bool driverInitialised;
+    bool wifiConfigured;
+    bool wifiStarted;
     bool initialised;
     bool connected;
     bool ipObtained;
@@ -16,6 +19,8 @@ struct NetworkCtx{
     wifi_config_t wifiConfig;
 
     esp_ip4_addr_t deviceAddress;
+
+    uint8_t reconnectAttempt;
 
 };
 

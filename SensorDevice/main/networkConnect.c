@@ -12,11 +12,12 @@ static const char * logTag = "NetCon";
 #define assertEspCall( call ) if( call != ESP_OK ) return 1;
 #define assertEspCallMessage( call, msg ) if( call != ESP_OK ){ ESP_LOGE( logTag, msg ); return 1; }
 
+#define RECONNECT_ATTEMPTS 5
 /***************************
  * Network event callbacks
  ***************************/
 
-static void upObtainedCallback( void *_arg, esp_event_base_t _eventBase, 
+static void ipObtainedCallback( void *_arg, esp_event_base_t _eventBase, 
                            int32_t _eventId, void *_eventData ){
     volatile NetworkCtx *_ctx = (NetworkCtx*) _arg;
     ip_event_got_ip_t *eventData = (ip_event_got_ip_t*) _eventData;
@@ -28,15 +29,34 @@ static void upObtainedCallback( void *_arg, esp_event_base_t _eventBase,
 static void wifiDisconnectedCallback( void *_arg, esp_event_base_t _eventBase, 
                               int32_t _eventId, void *_eventData ){
     volatile NetworkCtx *_ctx = (NetworkCtx*) _arg;
-    _ctx->connected = false;
-    ESP_LOGI( logTag, "Wifi disconnected" );
+    if( !_ctx->connected ){
+        ESP_LOGE( logTag, "Could not connect to WiFi" );
+    }
+    else{
+        ESP_LOGE( logTag, "WiFi disconnected" );
+        _ctx->connected = false;
+        _ctx->ipObtained = false;
+    }
+    if( _ctx->reconnectAttempt++ < RECONNECT_ATTEMPTS ){
+        ESP_LOGI( logTag, "Attempting reconnect %i", _ctx->reconnectAttempt );
+        esp_wifi_connect();
+    }
 }
 
 static void wifiConnectedCallback( void *_arg, esp_event_base_t _eventBase, 
                            int32_t _eventId, void *_eventData ){
     volatile NetworkCtx *_ctx = (NetworkCtx*) _arg;
     _ctx->connected = true;
+    _ctx->reconnectAttempt = 0;
     ESP_LOGI( logTag, "Wifi connected" );
+}
+
+static void wifiStartedCallback( void *_arg, esp_event_base_t _eventBase, 
+                           int32_t _eventId, void *_eventData ){
+    volatile NetworkCtx *_ctx = (NetworkCtx*) _arg;
+    _ctx->wifiStarted = true;
+    ESP_LOGI( logTag, "Wifi Started" );
+    esp_wifi_connect();
 }
 
 
@@ -46,36 +66,23 @@ static void wifiConnectedCallback( void *_arg, esp_event_base_t _eventBase,
 
 int wifiInit( NetworkCtx *_ctx ){
     assertEspCallMessage( esp_netif_init(), "Failed to initialise network interface" );
+    _ctx->netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t wifiInitCfg = WIFI_INIT_CONFIG_DEFAULT();
     assertEspCallMessage( esp_wifi_init( &wifiInitCfg ), "Failed to initialise wifi" );
-    
-    esp_netif_config_t netifCfg = ESP_NETIF_DEFAULT_WIFI_STA();
-    esp_netif_t *netif = esp_netif_new( &netifCfg );
 
-    if( !netif ){
-        ESP_LOGE( logTag, "Failed to create network interface" );
-        return 1;
-    }
-    _ctx->netif = netif;
-    
-    assertEspCallMessage( esp_netif_attach_wifi_station( _ctx->netif ),
-                          "Failed to attach interface to station" );
-    //assertEspCallMessage( esp_wifi_set_default_wifi_sta_handlers(),
-    //                      "Failed to set default callbacks" );
-    int ret = esp_wifi_set_default_wifi_sta_handlers();
-    if( ret != ESP_OK ){
-        ESP_LOGE( logTag, "Failed to set default callbacks, %s", esp_err_to_name( ret ) );
-    }
     
     assertEspCallMessage( esp_event_handler_register( WIFI_EVENT, WIFI_EVENT_STA_CONNECTED,
                                 &wifiConnectedCallback, (void*) _ctx ),
                           "Failed to add 'wifi connected' callback" );
+    assertEspCallMessage( esp_event_handler_register( WIFI_EVENT, WIFI_EVENT_STA_START,
+                                &wifiStartedCallback, (void*) _ctx ),
+                          "Failed to add 'wifi started' callback" );
     assertEspCallMessage( esp_event_handler_register( WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
                                 &wifiDisconnectedCallback, (void*) _ctx ),
                           "Failed to add 'wifi disconnected' callback" );
     assertEspCallMessage( esp_event_handler_register( IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                &upObtainedCallback, (void*) _ctx ),
+                                &ipObtainedCallback, (void*) _ctx ),
                           "Failed to add 'ip obtained' callback" );
 
     return 0;
@@ -116,7 +123,7 @@ int wifiConfig( NetworkCtx *_ctx, const char *_ssid, const char *_psk ){
 int wifiStart( NetworkCtx *_ctx ){
     assertEspCallMessage( esp_wifi_start(), "Failed to start wifi" );
 
-    assertEspCallMessage( esp_wifi_connect(), "Failed to connect wifi" );
+   // assertEspCallMessage( esp_wifi_connect(), "Failed to connect wifi" );
 
     return 0;
 }
@@ -127,11 +134,20 @@ int connectToWifi( NetworkCtx *_ctx, const char *_ssid, const char * _psk,
         return 1;
     }
     
-    if( wifiInit( _ctx ) || wifiConfig( _ctx, _ssid, _psk ) || wifiStart( _ctx ) ){
+    if( !_ctx->driverInitialised && wifiInit( _ctx ) ){
+        return 1;
+    }
+    _ctx->driverInitialised = true;
+
+    if( !_ctx->wifiConfigured && wifiConfig( _ctx, _ssid, _psk ) ){
+        return 1;
+    }
+    _ctx->wifiConfigured = true;
+
+    if( wifiStart( _ctx ) ){
         return 1;
     }
 
-    _ctx->initialised = true;
     if( _block ){
         // Wait for IP address
         int64_t startTime = esp_timer_get_time();
