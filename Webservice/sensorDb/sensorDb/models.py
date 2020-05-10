@@ -2,8 +2,8 @@ from sqlalchemy import Column, Integer, String, Float
 from sensorDb.database import Base
 import time
 
-class SystemStatusPoint( Base ):
-    __tablename__ = 'SystemStatus'
+class SensorDataPoint( Base ):
+    __tablename__ = 'SensorData'
 
     id = Column( Integer, primary_key=True )
     temp = Column( Float )
