@@ -1,0 +1,11 @@
+[Unit]
+Description=Service to handle the TempMon MQTT server
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/TempMonPortal/webserver
+Environment="PATH=/opt/TempMonPortal/venv/bin"
+ExecStart=/opt/TempMonPortal/venv/bin/python /opt/TempMonPortal/webserver/mqttListener.py
+
+[Install]
+WantedBy=multi-user.target
