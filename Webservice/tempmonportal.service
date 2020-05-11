@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/TempMonPortal/webserver
 Environment="PATH=/opt/TempMonPortal/venv/bin"
-ExecStart=/opt/TempMonPortal/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:8000 sensorPortal:app
+ExecStart=/opt/TempMonPortal/venv/bin/gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:8000 sensorPortal:app
 
 [Install]
 WantedBy=multi-user.target
