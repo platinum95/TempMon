@@ -27,6 +27,11 @@ def on_message( client, userdata, msg ):
         print( "Temperature: " + str( temp ) + ", humidity: " + str( hum ) )
         sql = "INSERT INTO SensorData (temp, humidity, timestamp) VALUES(%s, %s, %s)"
         vals = ( temp, hum, eTime )
+        if ( not tempMonDb.is_connected() ):
+            tempMonDb.reconnect()
+            if ( not tempMonDb.is_connected() ):
+                print ( "Lost connection to MySQL, can't store data" )
+                return
         cursor = tempMonDb.cursor()
         cursor.execute( sql, vals )
         tempMonDb.commit()
